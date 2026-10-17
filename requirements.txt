@@ -1,0 +1,43 @@
+# ============================================================
+# AI Agent Execution Platform — Python Dependencies
+# Week 1: Foundation Layer
+# ============================================================
+
+# --- Web Framework ---
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+
+# --- Database ---
+sqlalchemy[asyncio]==2.0.23
+asyncpg==0.29.0
+alembic==1.12.1
+
+# --- Redis & Queues ---
+redis==5.0.1
+arq==0.25.0
+aioredis==2.0.1
+
+# --- LLM & Agents (placeholder, Week 2) ---
+langchain==0.1.13
+langgraph==0.0.28
+groq==0.4.2
+google-generativeai==0.3.2
+
+# --- Tools ---
+duckduckgo-search==3.9.10
+aiohttp==3.9.1
+
+# --- Observability ---
+prometheus-client==0.19.0
+
+# --- Utilities ---
+python-dotenv==1.0.0
+python-multipart==0.0.6
+uuid6==2024.1.12
+
+# --- Testing ---
+pytest==7.4.3
+pytest-asyncio==0.21.1
+httpx==0.25.2

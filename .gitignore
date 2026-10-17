@@ -1,0 +1,67 @@
+# --- Secrets ---
+.env
+.env.local
+.env.*.local
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyo
+
+# --- Build / Distribution ---
+build/
+dist/
+*.egg-info/
+*.egg
+MANIFEST
+
+# --- Testing & Coverage ---
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# --- Type checking ---
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# --- Virtual environments ---
+venv/
+env/
+.venv/
+.env/
+
+# --- IDEs ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Database ---
+*.db
+*.sqlite3
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Alembic ---
+# Keep versions dir but ignore local state
+migrations/__pycache__/
+
+# --- Docker ---
+# (docker-compose.yml is tracked; override files are not)
+docker-compose.override.yml
+
+# --- Prometheus data ---
+prometheus_data/
