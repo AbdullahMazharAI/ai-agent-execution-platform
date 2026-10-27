@@ -7,6 +7,7 @@ CREATE TYPE task_status AS ENUM (
     'PENDING',
     'PLANNING',
     'EXECUTING',
+    'SYNTHESIZING',
     'VERIFYING',
     'COMPLETED',
     'FAILED',

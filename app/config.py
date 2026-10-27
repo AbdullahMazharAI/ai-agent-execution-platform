@@ -37,6 +37,14 @@ class Settings(BaseSettings):
     GROQ_API_KEY: Optional[str] = None
     GEMINI_API_KEY: Optional[str] = None
     OLLAMA_BASE_URL: str = "http://localhost:11434"
+    GROQ_MODEL: str = "llama-3.1-8b-instant"
+    GEMINI_MODEL: str = "gemini-1.5-flash"
+    LLM_TIMEOUT_SECONDS: float = 60.0
+
+    # ── Tools ──────────────────────────────────────────────────────────────
+    FILE_TOOL_ROOT: str = "./uploads"
+    PYTHON_TOOL_TIMEOUT_SECONDS: float = 10.0
+    TOOL_TIMEOUT_SECONDS: float = 30.0
 
     # ── Monitoring ─────────────────────────────────────────────────────────
     PROMETHEUS_ENABLED: bool = True

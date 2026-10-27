@@ -3,11 +3,7 @@ app/api/v1/auth.py
 ==================
 API key authentication dependency for FastAPI.
 
-Current implementation (Week 1):
-  - Validates header presence and "sk-" prefix format
-  - Returns a mock user UUID so endpoint stubs run end-to-end
-
-Week 2 upgrade path:
+Week 2 implementation:
   - Hash the incoming key with SHA-256
   - Query ``api_keys`` table WHERE key_hash = <hash> AND status = 'ACTIVE'
   - Check expiry, update ``last_used_at``
@@ -18,17 +14,17 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import Depends, Header, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db_session
+from app.db.models import APIKey, APIKeyStatus
 
 logger = logging.getLogger(__name__)
-
-# Sentinel UUID used as the mock user in Week 1 before real auth is wired up.
-_MOCK_USER_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
 
 
 def _hash_api_key(raw_key: str) -> str:
@@ -43,11 +39,11 @@ async def verify_api_key(
     """Verify the ``X-API-Key`` request header and return the caller's user ID.
 
     Raises ``HTTP 401`` for missing or malformed keys.
-    Raises ``HTTP 403`` for revoked / expired keys (Week 2).
+    Raises ``HTTP 401`` for revoked / expired / unknown keys.
 
     Args:
         x_api_key: The raw API key from the request header.
-        db: Injected async database session (used in Week 2 for DB lookup).
+        db: Injected async database session.
 
     Returns:
         The UUID of the authenticated user.
@@ -68,24 +64,35 @@ async def verify_api_key(
             headers={"WWW-Authenticate": "ApiKey"},
         )
 
-    # ── Week 2: replace below with real DB lookup ──────────────────────────
-    # key_hash = _hash_api_key(x_api_key)
-    # result = await db.execute(
-    #     select(APIKey).where(
-    #         APIKey.key_hash == key_hash,
-    #         APIKey.status == APIKeyStatus.ACTIVE,
-    #     )
-    # )
-    # api_key_obj = result.scalar_one_or_none()
-    # if api_key_obj is None:
-    #     raise HTTPException(status_code=401, detail="Invalid or revoked API key")
-    # if api_key_obj.expires_at and api_key_obj.expires_at < datetime.now(timezone.utc):
-    #     raise HTTPException(status_code=401, detail="API key has expired")
-    # # Update last_used_at asynchronously (fire-and-forget acceptable here)
-    # api_key_obj.last_used_at = datetime.now(timezone.utc)
-    # await db.commit()
-    # return api_key_obj.user_id
-    # ──────────────────────────────────────────────────────────────────────
+    # Hash and look up in DB
+    key_hash = _hash_api_key(x_api_key)
+    result = await db.execute(
+        select(APIKey).where(
+            APIKey.key_hash == key_hash,
+            APIKey.status == APIKeyStatus.ACTIVE,
+        )
+    )
+    api_key_obj = result.scalar_one_or_none()
 
-    logger.debug("Auth OK (mock) for key prefix=%r", x_api_key[:8])
-    return _MOCK_USER_ID
+    if api_key_obj is None:
+        logger.warning("Request rejected: API key not found or inactive (hash prefix=%s...)", key_hash[:8])
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or revoked API key.",
+            headers={"WWW-Authenticate": "ApiKey"},
+        )
+
+    if api_key_obj.expires_at and api_key_obj.expires_at < datetime.now(timezone.utc):
+        logger.warning("Request rejected: API key expired")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="API key has expired.",
+            headers={"WWW-Authenticate": "ApiKey"},
+        )
+
+    # Update last_used_at
+    api_key_obj.last_used_at = datetime.now(timezone.utc)
+    # Note: commit happens in the get_db_session dependency cleanup
+
+    logger.debug("Auth OK for user=%s key_prefix=%r", api_key_obj.user_id, api_key_obj.key_prefix)
+    return api_key_obj.user_id

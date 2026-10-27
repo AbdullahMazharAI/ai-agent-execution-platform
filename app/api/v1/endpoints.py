@@ -1,17 +1,19 @@
 """
 app/api/v1/endpoints.py
 =======================
-All 10 REST API endpoints (Phase 3).
+All 10 REST API endpoints (Phase 3, Week 2 wiring).
 
-Implementation status (Week 1):
-  ✅  Endpoint structure + routing
-  ✅  Request / response schemas wired
-  ✅  Auth dependency on every endpoint
-  🔲  DB reads/writes        → Week 2
-  🔲  ARQ task enqueueing    → Week 2
-  🔲  SSE streaming          → Week 4
-  🔲  Cancellation flag      → Week 4
-  🔲  Prometheus metrics     → Week 5
+Implementation status:
+  ✅  POST /tasks         — real DB insert + ARQ enqueue
+  ✅  GET  /tasks/{id}    — real DB lookup
+  ✅  GET  /tasks         — real paginated list
+  ✅  GET  /tasks/{id}/steps  — real task_steps query
+  ✅  GET  /tasks/{id}/errors — real errors query
+  🔲  POST /tasks/{id}/cancel — Week 4
+  🔲  GET  /tasks/{id}/events — Week 4 (SSE)
+  🔲  GET  /tasks/{id}/result — Week 4-5
+  🔲  POST /tasks/{id}/retry  — Week 4
+  🔲  GET  /metrics           — Week 5
 """
 
 from __future__ import annotations
@@ -22,15 +24,19 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import PlainTextResponse
+from sqlalchemy import func as sa_func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.auth import verify_api_key
+from app.core.queue import enqueue_task
 from app.database import get_db_session
+from app.db.models import Error as ErrorModel, Task, TaskStatus, TaskStep
 from app.db.schemas import (
     CancelTaskResponse,
     ErrorListResponse,
     TaskCreateRequest,
     TaskDetailResponse,
+    TaskErrorDetail,
     TaskListResponse,
     TaskResponse,
     TaskResultResponse,
@@ -41,11 +47,6 @@ from app.db.schemas import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["tasks"])
-
-# ── Placeholder sentinel ───────────────────────────────────────────────────────
-_MOCK_TASK_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
-_MOCK_USER_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
-_NOW = "2026-10-11T14:21:50Z"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -66,20 +67,28 @@ async def create_task(
     db: AsyncSession = Depends(get_db_session),
     user_id: UUID = Depends(verify_api_key),
 ) -> TaskResponse:
-    """Phase 3 — Endpoint 1.
-
-    Week 2 TODO:
-      1. INSERT into ``tasks`` table with status=PENDING.
-      2. Enqueue ``execute_task`` job to ARQ with the new task_id.
-      3. Return real task_id and created_at from the DB row.
-    """
+    """Insert Task row (status PENDING), enqueue execute_task, return 201."""
     logger.info("create_task called | user=%s goal=%r", user_id, request.goal[:80])
 
-    # --- Stub (Week 1) ---
+    task = Task(
+        user_id=user_id,
+        goal=request.goal,
+        status=TaskStatus.PENDING,
+    )
+    db.add(task)
+    await db.flush()  # Get the ID assigned
+
+    # Enqueue background job
+    try:
+        await enqueue_task(str(task.id))
+    except Exception as exc:
+        logger.error("Failed to enqueue task %s: %s", task.id, exc)
+        # Task is still in DB with PENDING status — worker can pick it up later
+
     return TaskResponse(
-        task_id=_MOCK_TASK_ID,
-        status="PENDING",
-        created_at=datetime.now(timezone.utc),
+        task_id=task.id,
+        status=task.status.value,
+        created_at=task.created_at or datetime.now(timezone.utc),
     )
 
 
@@ -97,32 +106,37 @@ async def get_task(
     db: AsyncSession = Depends(get_db_session),
     user_id: UUID = Depends(verify_api_key),
 ) -> TaskDetailResponse:
-    """Phase 3 — Endpoint 2.
-
-    Week 2 TODO:
-      1. SELECT from ``tasks`` WHERE id = task_id AND user_id = user_id.
-      2. Raise 404 if not found.
-      3. Calculate execution_time_ms from timestamps.
-      4. Return full TaskDetailResponse.
-    """
+    """SELECT from tasks WHERE id = task_id AND user_id = user_id."""
     logger.info("get_task called | user=%s task=%s", user_id, task_id)
 
-    # --- Stub (Week 1) ---
-    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        select(Task).where(Task.id == task_id, Task.user_id == user_id)
+    )
+    task = result.scalar_one_or_none()
+
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found.")
+
+    # Calculate execution time
+    execution_time_ms = None
+    if task.execution_started_at and task.execution_completed_at:
+        delta = task.execution_completed_at - task.execution_started_at
+        execution_time_ms = int(delta.total_seconds() * 1000)
+
     return TaskDetailResponse(
-        task_id=task_id,
-        user_id=user_id,
-        goal="Example task (stub)",
-        status="PENDING",
-        plan=None,
-        result=None,
-        error_message=None,
-        langgraph_thread_id=None,
-        execution_started_at=None,
-        execution_completed_at=None,
-        execution_time_ms=None,
-        created_at=now,
-        updated_at=now,
+        task_id=task.id,
+        user_id=task.user_id,
+        goal=task.goal,
+        status=task.status.value if isinstance(task.status, TaskStatus) else task.status,
+        plan=task.plan,
+        result=task.result,
+        error_message=task.error_message,
+        langgraph_thread_id=task.langgraph_thread_id,
+        execution_started_at=task.execution_started_at,
+        execution_completed_at=task.execution_completed_at,
+        execution_time_ms=execution_time_ms,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
     )
 
 
@@ -142,18 +156,52 @@ async def list_tasks(
     db: AsyncSession = Depends(get_db_session),
     user_id: UUID = Depends(verify_api_key),
 ) -> TaskListResponse:
-    """Phase 3 — Endpoint 3.
-
-    Week 2 TODO:
-      1. SELECT from ``tasks`` WHERE user_id = user_id [AND status = filter]
-         ORDER BY created_at DESC LIMIT limit OFFSET offset.
-      2. SELECT COUNT(*) for total.
-      3. Return TaskListResponse with real data.
-    """
+    """Real paginated list for the user."""
     logger.info("list_tasks called | user=%s limit=%d offset=%d", user_id, limit, offset)
 
-    # --- Stub (Week 1) ---
-    return TaskListResponse(tasks=[], total=0, limit=limit, offset=offset)
+    query = select(Task).where(Task.user_id == user_id)
+    count_query = select(sa_func.count()).select_from(Task).where(Task.user_id == user_id)
+
+    if status_filter:
+        try:
+            status_enum = TaskStatus(status_filter)
+            query = query.where(Task.status == status_enum)
+            count_query = count_query.where(Task.status == status_enum)
+        except ValueError:
+            pass  # ignore invalid status filter
+
+    query = query.order_by(Task.created_at.desc()).limit(limit).offset(offset)
+
+    result = await db.execute(query)
+    tasks = result.scalars().all()
+
+    count_result = await db.execute(count_query)
+    total = count_result.scalar() or 0
+
+    task_details = []
+    for t in tasks:
+        execution_time_ms = None
+        if t.execution_started_at and t.execution_completed_at:
+            delta = t.execution_completed_at - t.execution_started_at
+            execution_time_ms = int(delta.total_seconds() * 1000)
+
+        task_details.append(TaskDetailResponse(
+            task_id=t.id,
+            user_id=t.user_id,
+            goal=t.goal,
+            status=t.status.value if isinstance(t.status, TaskStatus) else t.status,
+            plan=t.plan,
+            result=t.result,
+            error_message=t.error_message,
+            langgraph_thread_id=t.langgraph_thread_id,
+            execution_started_at=t.execution_started_at,
+            execution_completed_at=t.execution_completed_at,
+            execution_time_ms=execution_time_ms,
+            created_at=t.created_at,
+            updated_at=t.updated_at,
+        ))
+
+    return TaskListResponse(tasks=task_details, total=total, limit=limit, offset=offset)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -173,21 +221,13 @@ async def cancel_task(
     db: AsyncSession = Depends(get_db_session),
     user_id: UUID = Depends(verify_api_key),
 ) -> CancelTaskResponse:
-    """Phase 3 — Endpoint 4.
-
-    Week 4 TODO:
-      1. Verify task belongs to user_id; raise 404/403 otherwise.
-      2. Verify task is in a cancellable state (PENDING/PLANNING/EXECUTING).
-      3. Set Redis key  ``cancel:{task_id}`` = "1"  with TTL 3600s.
-      4. Update task status to CANCELLED in DB.
-    """
+    """Week 4 stub."""
     logger.info("cancel_task called | user=%s task=%s", user_id, task_id)
 
-    # --- Stub (Week 1) ---
     return CancelTaskResponse(
         task_id=task_id,
         status="CANCELLED",
-        message="Cancellation requested (stub).",
+        message="Cancellation requested (stub — Week 4).",
     )
 
 
@@ -207,18 +247,9 @@ async def task_events_sse(
     db: AsyncSession = Depends(get_db_session),
     user_id: UUID = Depends(verify_api_key),
 ):
-    """Phase 3 — Endpoint 5.
-
-    Week 4 TODO:
-      1. Verify task belongs to user_id.
-      2. Subscribe to Redis Pub/Sub channel  ``task_events:{task_id}``.
-      3. Yield ``EventSourceResponse`` wrapping the async generator.
-      4. Send a final ``done`` event when task reaches terminal state.
-    """
+    """Week 4 stub."""
     logger.info("task_events_sse called | user=%s task=%s", user_id, task_id)
 
-    # --- Stub (Week 1) ---
-    # Real implementation: return EventSourceResponse(generator)
     return PlainTextResponse(
         content=(
             f"data: {{\"task_id\": \"{task_id}\", \"status\": \"stub\"}}\n\n"
@@ -241,17 +272,39 @@ async def get_task_steps(
     db: AsyncSession = Depends(get_db_session),
     user_id: UUID = Depends(verify_api_key),
 ) -> TaskStepsResponse:
-    """Phase 3 — Endpoint 6.
-
-    Week 3 TODO:
-      1. Verify task belongs to user_id.
-      2. SELECT from ``task_steps`` WHERE task_id = task_id ORDER BY step_number.
-      3. Return TaskStepsResponse.
-    """
+    """Real task_steps rows."""
     logger.info("get_task_steps called | user=%s task=%s", user_id, task_id)
 
-    # --- Stub (Week 1) ---
-    return TaskStepsResponse(steps=[], total=0)
+    # Verify task belongs to user
+    task_result = await db.execute(
+        select(Task.id).where(Task.id == task_id, Task.user_id == user_id)
+    )
+    if task_result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Task not found.")
+
+    result = await db.execute(
+        select(TaskStep)
+        .where(TaskStep.task_id == task_id)
+        .order_by(TaskStep.step_number)
+    )
+    steps = result.scalars().all()
+
+    step_responses = [
+        TaskStepResponse(
+            step_id=s.id,
+            task_id=s.task_id,
+            step_number=s.step_number,
+            step_description=s.step_description,
+            tool_name=s.tool_name,
+            status=s.status,
+            result=s.result,
+            created_at=s.created_at,
+            updated_at=s.updated_at,
+        )
+        for s in steps
+    ]
+
+    return TaskStepsResponse(steps=step_responses, total=len(step_responses))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -271,17 +324,9 @@ async def get_task_result(
     db: AsyncSession = Depends(get_db_session),
     user_id: UUID = Depends(verify_api_key),
 ) -> TaskResultResponse:
-    """Phase 3 — Endpoint 7.
-
-    Week 4 TODO:
-      1. Verify task belongs to user_id.
-      2. JOIN tasks + verification_runs + usage_metrics.
-      3. Raise 404 if task not found; 409 if not yet COMPLETED.
-      4. Return full TaskResultResponse.
-    """
+    """Week 4-5 stub — returns partial data."""
     logger.info("get_task_result called | user=%s task=%s", user_id, task_id)
 
-    # --- Stub (Week 1) ---
     return TaskResultResponse(
         task_id=task_id,
         status="PENDING",
@@ -305,21 +350,42 @@ async def get_task_errors(
     db: AsyncSession = Depends(get_db_session),
     user_id: UUID = Depends(verify_api_key),
 ) -> ErrorListResponse:
-    """Phase 3 — Endpoint 8.
-
-    Week 3 TODO:
-      1. Verify task belongs to user_id.
-      2. SELECT from ``errors`` WHERE task_id = task_id ORDER BY created_at.
-      3. Return ErrorListResponse.
-    """
+    """Real errors rows."""
     logger.info("get_task_errors called | user=%s task=%s", user_id, task_id)
 
-    # --- Stub (Week 1) ---
-    return ErrorListResponse(errors=[], total=0)
+    # Verify task belongs to user
+    task_result = await db.execute(
+        select(Task.id).where(Task.id == task_id, Task.user_id == user_id)
+    )
+    if task_result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Task not found.")
+
+    result = await db.execute(
+        select(ErrorModel)
+        .where(ErrorModel.task_id == task_id)
+        .order_by(ErrorModel.created_at)
+    )
+    errors = result.scalars().all()
+
+    error_details = [
+        TaskErrorDetail(
+            error_id=e.id,
+            task_id=e.task_id,
+            step_id=e.step_id,
+            error_type=e.error_type.value if hasattr(e.error_type, 'value') else str(e.error_type),
+            error_code=e.error_code,
+            error_message=e.error_message,
+            recovery_action=e.recovery_action,
+            created_at=e.created_at,
+        )
+        for e in errors
+    ]
+
+    return ErrorListResponse(errors=error_details, total=len(error_details))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 9. GET /tasks/{task_id}/retry — Retry a failed task
+# 9. POST /tasks/{task_id}/retry — Retry a failed task
 # ══════════════════════════════════════════════════════════════════════════════
 @router.post(
     "/tasks/{task_id}/retry",
@@ -332,16 +398,9 @@ async def retry_task(
     db: AsyncSession = Depends(get_db_session),
     user_id: UUID = Depends(verify_api_key),
 ) -> TaskResponse:
-    """Phase 3 — Endpoint 9.
-
-    Week 4 TODO:
-      1. Verify task belongs to user_id and is in FAILED state.
-      2. Reset task status to PENDING, clear error_message.
-      3. Re-enqueue to ARQ.
-    """
+    """Week 4 stub."""
     logger.info("retry_task called | user=%s task=%s", user_id, task_id)
 
-    # --- Stub (Week 1) ---
     return TaskResponse(
         task_id=task_id,
         status="PENDING",
@@ -363,14 +422,7 @@ async def retry_task(
     tags=["observability"],
 )
 async def prometheus_metrics() -> str:
-    """Phase 3 — Endpoint 10.
-
-    Week 5 TODO:
-      1. Import ``prometheus_client.generate_latest``.
-      2. Return ``generate_latest(REGISTRY)`` with content-type
-         ``text/plain; version=0.0.4; charset=utf-8``.
-    """
-    # --- Stub (Week 1) ---
+    """Week 5 stub."""
     return (
         "# HELP agent_platform_up Agent platform is running\n"
         "# TYPE agent_platform_up gauge\n"

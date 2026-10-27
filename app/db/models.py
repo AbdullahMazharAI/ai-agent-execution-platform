@@ -37,8 +37,20 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
+
+
+# Register SQLite compilation overrides for PostgreSQL-specific types so tests can run on SQLite
+@compiles(UUID, "sqlite")
+def _compile_uuid_sqlite(type_, compiler, **kw):
+    return "CHAR(36)"
+
+
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_sqlite(type_, compiler, **kw):
+    return "TEXT"
 
 
 # ── Base ───────────────────────────────────────────────────────────────────────
@@ -64,6 +76,7 @@ class TaskStatus(str, PyEnum):
     PENDING = "PENDING"
     PLANNING = "PLANNING"
     EXECUTING = "EXECUTING"
+    SYNTHESIZING = "SYNTHESIZING"
     VERIFYING = "VERIFYING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"

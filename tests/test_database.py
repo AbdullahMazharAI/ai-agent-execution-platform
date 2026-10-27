@@ -45,7 +45,7 @@ from app.db.models import (
 class TestEnums:
     def test_task_status_values(self) -> None:
         expected = {
-            "PENDING", "PLANNING", "EXECUTING", "VERIFYING",
+            "PENDING", "PLANNING", "EXECUTING", "SYNTHESIZING", "VERIFYING",
             "COMPLETED", "FAILED", "CANCELLED", "RETRYING",
         }
         assert {s.value for s in TaskStatus} == expected

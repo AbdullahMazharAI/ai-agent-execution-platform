@@ -249,3 +249,12 @@ class VerificationError(AgentError):
     def __init__(self, issues: list[str] | None = None) -> None:
         detail = "Verification failed: " + "; ".join(issues or ["unknown issue"])
         super().__init__(detail=detail, context={"issues": issues or []})
+
+
+class PlannerError(AgentError):
+    """Planner failed to produce a valid execution plan."""
+    error_code = "PLANNER_ERROR"
+
+    def __init__(self, detail: str = "Planner failed to generate a valid plan.", reason: str | None = None) -> None:
+        ctx = {"reason": reason} if reason else {}
+        super().__init__(detail=detail, context=ctx)
